@@ -36,6 +36,67 @@ prog = ctx.program(
 )
 prog['resolution'].value = (WIDTH, HEIGHT)
 
+text_prog = ctx.program(
+    vertex_shader="""
+        #version 330 core
+        in vec2 in_vert;
+        in vec2 in_uv;
+        out vec2 uv;
+        void main() {
+            gl_Position = vec4(in_vert, 0.0, 1.0);
+            uv = in_uv;
+        }
+    """,
+    fragment_shader="""
+        #version 330 core
+        uniform sampler2D tex;
+        in vec2 uv;
+        out vec4 fragColor;
+        void main() { fragColor = texture(tex, uv); }
+    """,
+)
+
+font = pygame.font.SysFont('monospace', 16)
+
+HINTS = [
+    "H  toggle hints",
+    "C  clear all",
+    "P  toggle control points",
+    "U  curve from selected",
+    "D  delete",
+    "LMB  add point",
+    "RMB on point  draw line",
+    "RMB on empty  box select",
+    "Drag point  move",
+    "ESC  quit",
+]
+
+def make_hint_overlay():
+    line_h, pad = 22, 10
+    rendered = [font.render(h, True, (220, 220, 220)) for h in HINTS]
+    w = max(s.get_width() for s in rendered) + pad * 2
+    th = len(rendered) * line_h + pad * 2
+    surf = pygame.Surface((w, th), pygame.SRCALPHA)
+    surf.fill((20, 20, 20, 200))
+    for i, ts in enumerate(rendered):
+        surf.blit(ts, (pad, pad + i * line_h))
+    data = pygame.image.tostring(surf, 'RGBA', True)
+    tex = ctx.texture((w, th), 4, data)
+    tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+    x1 = -1.0 + w / WIDTH * 2
+    y1 = 1.0 - th / HEIGHT * 2
+    verts = np.array([
+        -1.0, 1.0, 0.0, 1.0,
+         x1,  1.0, 1.0, 1.0,
+        -1.0,  y1, 0.0, 0.0,
+         x1,   y1, 1.0, 0.0,
+    ], dtype='f4')
+    vbo = ctx.buffer(verts.tobytes())
+    vao = ctx.vertex_array(text_prog, [(vbo, '2f 2f', 'in_vert', 'in_uv')])
+    return tex, vao, vbo
+
+hint_overlay = None
+
 def draw(mode, verts, color, point_size=10, line_width=1):
     if not verts: return
     ctx.point_size = point_size
@@ -80,6 +141,7 @@ dragging_ctrl_idx = None
 dragging_ctrl_old_ctrl = None
 ctrl_hovered_idx = None
 show_ctrl_points = False
+show_hints = False
 
 line_start = None
 curve_start = None
@@ -136,6 +198,8 @@ while running:
                 dragging_point = False
                 line_start = None
                 curve_start = None
+            elif event.key == pygame.K_h:
+                show_hints = not show_hints
             elif event.key == pygame.K_p:
                 show_ctrl_points = not show_ctrl_points
             elif event.key == pygame.K_u:
@@ -445,6 +509,17 @@ while running:
 
     verts = [c for p in all_points if p != selected_point for c in p[:2]]
     draw(moderngl.POINTS, verts, (1, 1, 1), point_size=10)
+
+    if show_hints:
+        if hint_overlay is None:
+            hint_overlay = make_hint_overlay()
+        tex, vao, vbo = hint_overlay
+        ctx.enable(moderngl.BLEND)
+        ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+        tex.use(0)
+        text_prog['tex'].value = 0
+        vao.render(moderngl.TRIANGLE_STRIP)
+        ctx.disable(moderngl.BLEND)
 
     pygame.display.flip()
 
