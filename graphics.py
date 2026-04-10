@@ -116,7 +116,7 @@ def arc_verts(p1, ctrl, p3, segments=32):
 
 points = defaultdict(list)
 lines = defaultdict(set)
-curves = defaultdict(list)
+curves = defaultdict(set)
 
 all_points = []
 all_lines = []
@@ -231,7 +231,7 @@ while running:
                     for curve in check_curves(selected_point):
                         all_curves.remove(curve)
                         other = curve[2] if curve[0] == pt else curve[0]
-                        curves[other] = [(c, e) for c, e in curves[other] if not (c == curve[1] and e == pt)]
+                        curves[other].discard((curve[1], pt))
                     if pt in curves:
                         del curves[pt]
                     selected_point = None
@@ -276,7 +276,7 @@ while running:
                     for curve in check_curves(selected_point):
                         all_curves.remove(curve)
                         other = curve[2] if curve[0] == pt else curve[0]
-                        curves[other] = [(c, e) for c, e in curves[other] if not (c == curve[1] and e == pt)]
+                        curves[other].discard((curve[1], pt))
                         all_dragged_curves.append((curve[1], other))
                     if pt in curves:
                         del curves[pt]
@@ -300,8 +300,8 @@ while running:
                     if all_selected_curves:
                         for curve in all_selected_curves:
                             all_curves.append(curve)
-                            curves[curve[0]].append((curve[1], curve[2]))
-                            curves[curve[2]].append((curve[1], curve[0]))
+                            curves[curve[0]].add((curve[1], curve[2]))
+                            curves[curve[2]].add((curve[1], curve[0]))
                         all_selected_curves.clear()
                     selection_start = mp
         elif event.type == pygame.MOUSEBUTTONUP:
@@ -310,8 +310,10 @@ while running:
                 curve = all_curves[dragging_ctrl_idx]
                 new_ctrl = curve[1]
                 old_ctrl = dragging_ctrl_old_ctrl
-                curves[curve[0]] = [(new_ctrl if c == old_ctrl and e == curve[2] else c, e) for c, e in curves[curve[0]]]
-                curves[curve[2]] = [(new_ctrl if c == old_ctrl and e == curve[0] else c, e) for c, e in curves[curve[2]]]
+                curves[curve[0]].discard((old_ctrl, curve[2]))
+                curves[curve[0]].add((new_ctrl, curve[2]))
+                curves[curve[2]].discard((old_ctrl, curve[0]))
+                curves[curve[2]].add((new_ctrl, curve[0]))
                 dragging_ctrl_idx = None
                 dragging_ctrl_old_ctrl = None
             elif dragging_point == True:
@@ -327,8 +329,8 @@ while running:
                 for ctrl, other in all_dragged_curves:
                     new_verts = arc_verts(new_pt, ctrl, other)
                     all_curves.append((new_pt, ctrl, other, new_verts))
-                    curves[new_pt].append((ctrl, other))
-                    curves[other].append((ctrl, new_pt))
+                    curves[new_pt].add((ctrl, other))
+                    curves[other].add((ctrl, new_pt))
             elif selection_in_progress == True:
                 selection_in_progress = False
                 x1, y1 = selection_start
@@ -363,8 +365,8 @@ while running:
                             if curve not in all_selected_curves:
                                 all_selected_curves.append(curve)
                                 all_curves.remove(curve)
-                                curves[curve[0]] = [(c, e) for c, e in curves[curve[0]] if not (c == curve[1] and e == curve[2])]
-                                curves[curve[2]] = [(c, e) for c, e in curves[curve[2]] if not (c == curve[1] and e == curve[0])]
+                                curves[curve[0]].discard((curve[1], curve[2]))
+                                curves[curve[2]].discard((curve[1], curve[0]))
             elif dragging_selection == True:
                 dragging_selection = False
                 dx = mp[0] - dragging_selection_start[0]
@@ -426,8 +428,8 @@ while running:
                     all_points.append(new_pt)
                 if p3 != curve_start:
                     all_curves.append((curve_start, curve_control, p3, arc_verts(curve_start, curve_control, p3)))
-                    curves[curve_start].append((curve_control, p3))
-                    curves[p3].append((curve_control, curve_start))
+                    curves[curve_start].add((curve_control, p3))
+                    curves[p3].add((curve_control, curve_start))
                 curve_start = None
                 curve_control = None
             dragging_point = False
