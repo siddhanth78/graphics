@@ -114,6 +114,12 @@ def arc_verts(p1, ctrl, p3, segments=32):
     y = mt*mt * p1[1] + 2*mt*t * ctrl[1] + t*t * p3[1]
     return [v for pair in zip(x, y) for v in pair]
 
+def strip_to_lines(verts):
+    out = []
+    for i in range(0, len(verts) - 2, 2):
+        out += [verts[i], verts[i+1], verts[i+2], verts[i+3]]
+    return out
+
 points = defaultdict(list)
 lines = defaultdict(set)
 curves = defaultdict(set)
@@ -460,8 +466,10 @@ while running:
         if all_line_points:
             verts = [c for line in all_line_points for c in [*mp, *line]]
             draw(moderngl.LINES, verts, (1, 0, 0))
+        dragged_verts = []
         for ctrl, other in all_dragged_curves:
-            draw(moderngl.LINE_STRIP, arc_verts(mp, ctrl, other), (1, 0, 0), line_width=2)
+            dragged_verts += strip_to_lines(arc_verts(mp, ctrl, other))
+        draw(moderngl.LINES, dragged_verts, (1, 0, 0), line_width=2)
 
     ctrl_hovered_idx = None
     if not dragging_point and not dragging_ctrl and not selection_in_progress and not curve_in_progress and not line_in_progress:
@@ -494,16 +502,33 @@ while running:
     verts = [c for line in all_lines if (line[0], line[1]) not in selected_set for c in [*line[0], *line[1]]]
     draw(moderngl.LINES, verts, (1, 1, 1), line_width=2)
 
-    for curve in all_selected_curves:
-        draw(moderngl.LINE_STRIP, curve[3], (0, 1, 0), line_width=2)
     selected_curve_keys = {(c[0], c[1], c[2]) for c in selected_curves}
+    green_curve_verts = []
+    white_curve_verts = []
+    ctrl_arm_verts = []
+    ctrl_pt_verts = []
+    hovered_arm_verts = []
+    hovered_pt_verts = []
+
+    for curve in all_selected_curves:
+        green_curve_verts += strip_to_lines(curve[3])
     for i, curve in enumerate(all_curves):
-        color = (0, 1, 0) if (curve[0], curve[1], curve[2]) in selected_curve_keys else (1, 1, 1)
-        draw(moderngl.LINE_STRIP, curve[3], color, line_width=2)
-        if show_ctrl_points or (curve[0], curve[1], curve[2]) in selected_curve_keys or i == ctrl_hovered_idx:
-            ctrl_color = (1, 0.5, 0) if i == ctrl_hovered_idx else (1, 1, 0.4)
-            draw(moderngl.LINES, [*curve[0], *curve[1], *curve[2], *curve[1]], ctrl_color, line_width=1)
-            draw(moderngl.POINTS, [*curve[1]], ctrl_color, point_size=8)
+        is_sel = (curve[0], curve[1], curve[2]) in selected_curve_keys
+        (green_curve_verts if is_sel else white_curve_verts).extend(strip_to_lines(curve[3]))
+        if show_ctrl_points or is_sel or i == ctrl_hovered_idx:
+            if i == ctrl_hovered_idx:
+                hovered_arm_verts += [*curve[0], *curve[1], *curve[2], *curve[1]]
+                hovered_pt_verts += [*curve[1]]
+            else:
+                ctrl_arm_verts += [*curve[0], *curve[1], *curve[2], *curve[1]]
+                ctrl_pt_verts += [*curve[1]]
+
+    draw(moderngl.LINES, white_curve_verts, (1, 1, 1), line_width=2)
+    draw(moderngl.LINES, green_curve_verts, (0, 1, 0), line_width=2)
+    draw(moderngl.LINES, ctrl_arm_verts, (1, 1, 0.4), line_width=1)
+    draw(moderngl.POINTS, ctrl_pt_verts, (1, 1, 0.4), point_size=8)
+    draw(moderngl.LINES, hovered_arm_verts, (1, 0.5, 0), line_width=1)
+    draw(moderngl.POINTS, hovered_pt_verts, (1, 0.5, 0), point_size=8)
 
     verts = [c for p in all_selected_points for c in p[:2]]
     if selected_point: verts += selected_point[:2]
