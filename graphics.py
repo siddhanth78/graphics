@@ -501,7 +501,7 @@ while running:
         color = (0, 1, 0) if (curve[0], curve[1], curve[2]) in selected_curve_keys else (1, 1, 1)
         draw(moderngl.LINE_STRIP, curve[3], color, line_width=2)
         if show_ctrl_points or (curve[0], curve[1], curve[2]) in selected_curve_keys or i == ctrl_hovered_idx:
-            ctrl_color = (1, 0.5, 0) if i == ctrl_hovered_idx else (0.4, 0.4, 1)
+            ctrl_color = (1, 0.5, 0) if i == ctrl_hovered_idx else (1, 1, 0.4)
             draw(moderngl.LINES, [*curve[0], *curve[1], *curve[2], *curve[1]], ctrl_color, line_width=1)
             draw(moderngl.POINTS, [*curve[1]], ctrl_color, point_size=8)
 
