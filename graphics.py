@@ -97,15 +97,67 @@ def make_hint_overlay():
 
 hint_overlay = None
 
+_draw_vbo = None
+_draw_vao = None
+_draw_capacity = 0
+
 def draw(mode, verts, color, point_size=10, line_width=1):
+    global _draw_vbo, _draw_vao, _draw_capacity
     if not verts: return
+    data = np.array(verts, dtype='f4').tobytes()
+    n_bytes = len(data)
     ctx.point_size = point_size
     ctx.line_width = line_width
     prog['color'].value = color
-    vbo = ctx.buffer(np.array(verts, dtype='f4').tobytes())
-    vao = ctx.simple_vertex_array(prog, vbo, 'in_vert')
-    vao.render(mode)
-    vao.release(); vbo.release()
+    if n_bytes > _draw_capacity:
+        if _draw_vbo is not None:
+            _draw_vao.release()
+            _draw_vbo.release()
+        _draw_capacity = n_bytes * 2
+        _draw_vbo = ctx.buffer(reserve=_draw_capacity)
+        _draw_vao = ctx.simple_vertex_array(prog, _draw_vbo, 'in_vert')
+    _draw_vbo.write(data)
+    _draw_vao.render(mode, vertices=len(verts) // 2)
+
+class BaseCache:
+    def __init__(self):
+        self.vbo = None
+        self.vao = None
+        self.cap = 0
+        self.n = 0
+
+    def upload(self, data_list):
+        if not data_list:
+            self.n = 0
+            return
+        data = np.array(data_list, dtype='f4').tobytes()
+        nb = len(data)
+        if nb > self.cap:
+            if self.vbo:
+                self.vao.release()
+                self.vbo.release()
+            self.cap = nb * 2
+            self.vbo = ctx.buffer(reserve=self.cap)
+            self.vao = ctx.simple_vertex_array(prog, self.vbo, 'in_vert')
+        self.vbo.write(data)
+        self.n = len(data_list) // 2
+
+    def render(self, mode, color, point_size=10, line_width=1):
+        if not self.n: return
+        ctx.point_size = point_size
+        ctx.line_width = line_width
+        prog['color'].value = color
+        self.vao.render(mode, vertices=self.n)
+
+pts_cache = BaseCache()
+lns_cache = BaseCache()
+crv_cache = BaseCache()
+dirty = True
+
+sel_pts_cache = BaseCache()
+sel_lns_cache = BaseCache()
+sel_crv_cache = BaseCache()
+sel_dirty = False
 
 def arc_verts(p1, ctrl, p3, segments=32):
     t = np.linspace(0, 1, segments + 1)
@@ -115,14 +167,16 @@ def arc_verts(p1, ctrl, p3, segments=32):
     return [v for pair in zip(x, y) for v in pair]
 
 def strip_to_lines(verts):
-    out = []
-    for i in range(0, len(verts) - 2, 2):
-        out += [verts[i], verts[i+1], verts[i+2], verts[i+3]]
-    return out
+    a = np.array(verts, dtype='f4').reshape(-1, 2)
+    pairs = np.stack([a[:-1], a[1:]], axis=1)
+    return pairs.reshape(-1).tolist()
+
 
 points = defaultdict(list)
 lines = defaultdict(set)
 curves = defaultdict(set)
+curve_lookup = {}  # (p1, ctrl, p2) and (p2, ctrl, p1) -> curve tuple
+ctrl_points = defaultdict(list)  # quadrant -> [[x, y, quad, curve_idx], ...]
 
 all_points = []
 all_lines = []
@@ -158,11 +212,44 @@ line_quad = 1
 line_len = 0
     
 def check_lines(point):
-    return [((point[0], point[1]), line) for line in lines[(point[0], point[1])]]
+    return [((point[0], point[1]), line) for line in lines.get((point[0], point[1]), ())]
 
 def check_curves(point):
     pt = (point[0], point[1])
-    return [c for c in all_curves if c[0] == pt or c[2] == pt]
+    return [curve_lookup[(pt, ctrl, other)] for ctrl, other in curves.get(pt, ())]
+
+def _ctrl_quad(x, y):
+    if x*2 < WIDTH and y*2 < HEIGHT: return 1
+    elif x*2 >= WIDTH and y*2 < HEIGHT: return 2
+    elif x*2 < WIDTH and y*2 >= HEIGHT: return 3
+    else: return 4
+
+def add_ctrl_point(curve_idx):
+    ctrl = all_curves[curve_idx][1]
+    quad = _ctrl_quad(ctrl[0], ctrl[1])
+    ctrl_points[quad].append([ctrl[0], ctrl[1], quad, curve_idx])
+
+def remove_ctrl_point(curve_idx):
+    for q in ctrl_points.values():
+        for entry in q:
+            if entry[3] == curve_idx:
+                q.remove(entry)
+                break
+    for q in ctrl_points.values():
+        for entry in q:
+            if entry[3] > curve_idx:
+                entry[3] -= 1
+
+def update_ctrl_point(curve_idx, x, y):
+    for q in ctrl_points.values():
+        for entry in q:
+            if entry[3] == curve_idx:
+                q.remove(entry)
+                new_quad = _ctrl_quad(x, y)
+                ctrl_points[new_quad].append([x, y, new_quad, curve_idx])
+                return
+
+clock = pygame.time.Clock()
 
 while running:
 
@@ -192,12 +279,16 @@ while running:
                 all_points.clear()
                 all_lines.clear()
                 all_curves.clear()
+                curve_lookup.clear()
+                ctrl_points.clear()
+                dirty = True
                 selected_point = None
                 selected_lines = []
                 selected_curves = []
                 all_selected_points = []
                 all_selected_lines = []
                 all_selected_curves = []
+                sel_dirty = True
                 selection_in_progress = False
                 line_in_progress = False
                 curve_in_progress = False
@@ -235,11 +326,16 @@ while running:
                         del lines[(selected_point[0], selected_point[1])]
                     pt = (selected_point[0], selected_point[1])
                     for curve in check_curves(selected_point):
+                        _cidx = all_curves.index(curve)
+                        remove_ctrl_point(_cidx)
                         all_curves.remove(curve)
+                        curve_lookup.pop((curve[0], curve[1], curve[2]), None)
+                        curve_lookup.pop((curve[2], curve[1], curve[0]), None)
                         other = curve[2] if curve[0] == pt else curve[0]
                         curves[other].discard((curve[1], pt))
                     if pt in curves:
                         del curves[pt]
+                    dirty = True
                     selected_point = None
                     selected_lines = []
                     selected_curves = []
@@ -247,6 +343,7 @@ while running:
                     all_selected_lines.clear()
                     all_selected_points.clear()
                     all_selected_curves.clear()
+                    sel_dirty = True
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 1:
@@ -258,6 +355,7 @@ while running:
                     new_point = [mp[0], mp[1], mp_quadrant]
                     points[mp_quadrant].append(new_point)
                     all_points.append(new_point)
+                    dirty = True
                 elif (all_selected_points or all_selected_lines or all_selected_curves) and dragging_selection == False:
                     dragging_selection = True
                     dragging_selection_start = mp
@@ -280,12 +378,17 @@ while running:
                     pt = (selected_point[0], selected_point[1])
                     all_dragged_curves = []
                     for curve in check_curves(selected_point):
+                        _cidx = all_curves.index(curve)
+                        remove_ctrl_point(_cidx)
                         all_curves.remove(curve)
+                        curve_lookup.pop((curve[0], curve[1], curve[2]), None)
+                        curve_lookup.pop((curve[2], curve[1], curve[0]), None)
                         other = curve[2] if curve[0] == pt else curve[0]
                         curves[other].discard((curve[1], pt))
                         all_dragged_curves.append((curve[1], other))
                     if pt in curves:
                         del curves[pt]
+                    dirty = True
             elif event.button == 3:
                 if selected_point != None and line_in_progress == False:
                     line_in_progress = True
@@ -306,9 +409,14 @@ while running:
                     if all_selected_curves:
                         for curve in all_selected_curves:
                             all_curves.append(curve)
+                            add_ctrl_point(len(all_curves) - 1)
+                            curve_lookup[(curve[0], curve[1], curve[2])] = curve
+                            curve_lookup[(curve[2], curve[1], curve[0])] = curve
                             curves[curve[0]].add((curve[1], curve[2]))
                             curves[curve[2]].add((curve[1], curve[0]))
                         all_selected_curves.clear()
+                    dirty = True
+                    sel_dirty = True
                     selection_start = mp
         elif event.type == pygame.MOUSEBUTTONUP:
             if dragging_ctrl:
@@ -334,9 +442,14 @@ while running:
                 new_pt = (new_point[0], new_point[1])
                 for ctrl, other in all_dragged_curves:
                     new_verts = arc_verts(new_pt, ctrl, other)
-                    all_curves.append((new_pt, ctrl, other, new_verts))
+                    c = (new_pt, ctrl, other, new_verts, strip_to_lines(new_verts))
+                    all_curves.append(c)
+                    add_ctrl_point(len(all_curves) - 1)
+                    curve_lookup[(new_pt, ctrl, other)] = c
+                    curve_lookup[(other, ctrl, new_pt)] = c
                     curves[new_pt].add((ctrl, other))
                     curves[other].add((ctrl, new_pt))
+                dirty = True
             elif selection_in_progress == True:
                 selection_in_progress = False
                 x1, y1 = selection_start
@@ -370,17 +483,24 @@ while running:
                         for curve in check_curves(p):
                             if curve not in all_selected_curves:
                                 all_selected_curves.append(curve)
+                                _cidx = all_curves.index(curve)
+                                remove_ctrl_point(_cidx)
                                 all_curves.remove(curve)
+                                curve_lookup.pop((curve[0], curve[1], curve[2]), None)
+                                curve_lookup.pop((curve[2], curve[1], curve[0]), None)
                                 curves[curve[0]].discard((curve[1], curve[2]))
                                 curves[curve[2]].discard((curve[1], curve[0]))
+                dirty = True
+                sel_dirty = True
             elif dragging_selection == True:
                 dragging_selection = False
                 dx = mp[0] - dragging_selection_start[0]
                 dy = mp[1] - dragging_selection_start[1]
-                np_all_selected_points = np.array(all_selected_points)
-                np_all_selected_points[:, 0] += dx
-                np_all_selected_points[:, 1] += dy
-                all_selected_points = np_all_selected_points.tolist()
+                if all_selected_points:
+                    np_all_selected_points = np.array(all_selected_points)
+                    np_all_selected_points[:, 0] += dx
+                    np_all_selected_points[:, 1] += dy
+                    all_selected_points = np_all_selected_points.tolist()
                 for p in all_selected_points:
                     if p[0]*2 < WIDTH and p[1]*2 < HEIGHT: p[2] = 1
                     elif p[0]*2 >= WIDTH and p[1]*2 < HEIGHT: p[2] = 2
@@ -401,7 +521,8 @@ while running:
                     new_p1 = (curve[0][0] + dx, curve[0][1] + dy)
                     new_ctrl = (curve[1][0] + dx, curve[1][1] + dy)
                     new_p3 = (curve[2][0] + dx, curve[2][1] + dy)
-                    all_selected_curves[i] = (new_p1, new_ctrl, new_p3, arc_verts(new_p1, new_ctrl, new_p3))
+                    _av = arc_verts(new_p1, new_ctrl, new_p3)
+                    all_selected_curves[i] = (new_p1, new_ctrl, new_p3, _av, strip_to_lines(_av))
                     for pt in (new_p1, new_p3):
                         if pt[0]*2 < WIDTH and pt[1]*2 < HEIGHT: quad = 1
                         elif pt[0]*2 >= WIDTH and pt[1]*2 < HEIGHT: quad = 2
@@ -409,6 +530,7 @@ while running:
                         else: quad = 4
                         if [pt[0], pt[1], quad] not in all_selected_points:
                             all_selected_points.append([pt[0], pt[1], quad])
+                sel_dirty = True
             elif line_in_progress == True:
                 line_in_progress = False
                 if selected_point is not None:
@@ -422,6 +544,7 @@ while running:
                     lines[(line_start[0], line_start[1])].add(line_end)
                     lines[(line_end[0], line_end[1])].add(line_start)
                     all_lines.append((line_start, line_end))
+                dirty = True
                 line_start = None
             elif curve_in_progress == True:
                 curve_in_progress = False
@@ -433,9 +556,15 @@ while running:
                     points[mp_quadrant].append(new_pt)
                     all_points.append(new_pt)
                 if p3 != curve_start:
-                    all_curves.append((curve_start, curve_control, p3, arc_verts(curve_start, curve_control, p3)))
+                    _av = arc_verts(curve_start, curve_control, p3)
+                    c = (curve_start, curve_control, p3, _av, strip_to_lines(_av))
+                    all_curves.append(c)
+                    add_ctrl_point(len(all_curves) - 1)
+                    curve_lookup[(curve_start, curve_control, p3)] = c
+                    curve_lookup[(p3, curve_control, curve_start)] = c
                     curves[curve_start].add((curve_control, p3))
                     curves[p3].add((curve_control, curve_start))
+                dirty = True
                 curve_start = None
                 curve_control = None
             dragging_point = False
@@ -473,15 +602,22 @@ while running:
 
     ctrl_hovered_idx = None
     if not dragging_point and not dragging_ctrl and not selection_in_progress and not curve_in_progress and not line_in_progress:
-        for i, curve in enumerate(all_curves):
-            ctrl = curve[1]
-            if mp[0] - 5 <= ctrl[0] <= mp[0] + 5 and mp[1] - 5 <= ctrl[1] <= mp[1] + 5:
-                ctrl_hovered_idx = i
+        for entry in ctrl_points[mp_quadrant]:
+            if mp[0] - 5 <= entry[0] <= mp[0] + 5 and mp[1] - 5 <= entry[1] <= mp[1] + 5:
+                ctrl_hovered_idx = entry[3]
                 break
 
     if dragging_ctrl:
         curve = all_curves[dragging_ctrl_idx]
-        all_curves[dragging_ctrl_idx] = (curve[0], mp, curve[2], arc_verts(curve[0], mp, curve[2]))
+        _av = arc_verts(curve[0], mp, curve[2])
+        curve_lookup.pop((curve[0], curve[1], curve[2]), None)
+        curve_lookup.pop((curve[2], curve[1], curve[0]), None)
+        new_curve = (curve[0], mp, curve[2], _av, strip_to_lines(_av))
+        all_curves[dragging_ctrl_idx] = new_curve
+        update_ctrl_point(dragging_ctrl_idx, mp[0], mp[1])
+        curve_lookup[(new_curve[0], new_curve[1], new_curve[2])] = new_curve
+        curve_lookup[(new_curve[2], new_curve[1], new_curve[0])] = new_curve
+        dirty = True
 
     if not dragging_point and not dragging_ctrl and not selection_in_progress:
         for p in points[mp_quadrant]:
@@ -491,51 +627,56 @@ while running:
                 selected_curves = check_curves(selected_point)
                 break
     
-    selected_set = set(selected_lines) | {(b, a) for a, b in selected_lines}
+    if dirty:
+        pts_cache.upload([c for p in all_points for c in p[:2]])
+        lns_cache.upload([c for l in all_lines for c in [*l[0], *l[1]]])
+        crv_cache.upload([c for curve in all_curves for c in curve[4]])
+        dirty = False
 
-    verts = []
-    for l in all_selected_lines: verts += [*l[0], *l[1]]
-    for line in all_lines:
-        if (line[0], line[1]) in selected_set: verts += [*line[0], *line[1]]
-    draw(moderngl.LINES, verts, (0, 1, 0), line_width=2)
+    lns_cache.render(moderngl.LINES, (1, 1, 1), line_width=2)
+    crv_cache.render(moderngl.LINES, (1, 1, 1), line_width=2)
+    pts_cache.render(moderngl.POINTS, (1, 1, 1), point_size=10)
 
-    verts = [c for line in all_lines if (line[0], line[1]) not in selected_set for c in [*line[0], *line[1]]]
-    draw(moderngl.LINES, verts, (1, 1, 1), line_width=2)
+    if sel_dirty:
+        sel_lns_cache.upload([c for l in all_selected_lines for c in [*l[0], *l[1]]])
+        sel_crv_cache.upload([c for curve in all_selected_curves for c in curve[4]])
+        sel_pts_cache.upload([c for p in all_selected_points for c in p[:2]])
+        sel_dirty = False
 
-    selected_curve_keys = {(c[0], c[1], c[2]) for c in selected_curves}
-    green_curve_verts = []
-    white_curve_verts = []
+    sel_lns_cache.render(moderngl.LINES, (0, 1, 0), line_width=2)
+    sel_crv_cache.render(moderngl.LINES, (0, 1, 0), line_width=2)
+    sel_pts_cache.render(moderngl.POINTS, (0, 1, 0), point_size=10)
+
+    hover_line_verts = [c for line in selected_lines for c in [*line[0], *line[1]]]
+    draw(moderngl.LINES, hover_line_verts, (0, 1, 0), line_width=2)
+    hover_curve_verts = [c for curve in selected_curves for c in curve[4]]
+    draw(moderngl.LINES, hover_curve_verts, (0, 1, 0), line_width=2)
+    draw(moderngl.POINTS, selected_point[:2] if selected_point else [], (0, 1, 0), point_size=10)
+
     ctrl_arm_verts = []
     ctrl_pt_verts = []
     hovered_arm_verts = []
     hovered_pt_verts = []
-
-    for curve in all_selected_curves:
-        green_curve_verts += strip_to_lines(curve[3])
-    for i, curve in enumerate(all_curves):
-        is_sel = (curve[0], curve[1], curve[2]) in selected_curve_keys
-        (green_curve_verts if is_sel else white_curve_verts).extend(strip_to_lines(curve[3]))
-        if show_ctrl_points or is_sel or i == ctrl_hovered_idx:
+    if show_ctrl_points:
+        for i, curve in enumerate(all_curves):
             if i == ctrl_hovered_idx:
                 hovered_arm_verts += [*curve[0], *curve[1], *curve[2], *curve[1]]
                 hovered_pt_verts += [*curve[1]]
             else:
                 ctrl_arm_verts += [*curve[0], *curve[1], *curve[2], *curve[1]]
                 ctrl_pt_verts += [*curve[1]]
-
-    draw(moderngl.LINES, white_curve_verts, (1, 1, 1), line_width=2)
-    draw(moderngl.LINES, green_curve_verts, (0, 1, 0), line_width=2)
+    else:
+        for curve in selected_curves:
+            ctrl_arm_verts += [*curve[0], *curve[1], *curve[2], *curve[1]]
+            ctrl_pt_verts += [*curve[1]]
+        if ctrl_hovered_idx is not None:
+            curve = all_curves[ctrl_hovered_idx]
+            hovered_arm_verts += [*curve[0], *curve[1], *curve[2], *curve[1]]
+            hovered_pt_verts += [*curve[1]]
     draw(moderngl.LINES, ctrl_arm_verts, (1, 1, 0.4), line_width=1)
     draw(moderngl.POINTS, ctrl_pt_verts, (1, 1, 0.4), point_size=8)
     draw(moderngl.LINES, hovered_arm_verts, (1, 0.5, 0), line_width=1)
     draw(moderngl.POINTS, hovered_pt_verts, (1, 0.5, 0), point_size=8)
-
-    verts = [c for p in all_selected_points for c in p[:2]]
-    if selected_point: verts += selected_point[:2]
-    draw(moderngl.POINTS, verts, (0, 1, 0), point_size=10)
-
-    verts = [c for p in all_points if p != selected_point for c in p[:2]]
-    draw(moderngl.POINTS, verts, (1, 1, 1), point_size=10)
 
     if show_hints:
         if hint_overlay is None:
@@ -549,5 +690,6 @@ while running:
         ctx.disable(moderngl.BLEND)
 
     pygame.display.flip()
+    clock.tick(60)
 
 pygame.quit()
