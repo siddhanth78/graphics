@@ -443,18 +443,24 @@ selection_start       = (0, 0)
 dragging_selection    = False
 dragging_sel_start    = (0, 0)
 
-running = True
-clock   = pygame.time.Clock()
+running       = True
+render_needed = True
+prev_sel_pt   = -1
+prev_ctrl_hov = -1
+prev_mp       = (-1, -1)
+clock         = pygame.time.Clock()
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 while running:
-    ctx.clear(0, 0, 0, 1)
     mp = pygame.mouse.get_pos()
 
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
+
+        elif event.type == pygame.VIDEOEXPOSE:
+            render_needed = True
 
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
@@ -470,9 +476,11 @@ while running:
 
             elif event.key == pygame.K_h:
                 show_hints = not show_hints
+                render_needed = True
 
             elif event.key == pygame.K_p:
                 show_ctrl_points = not show_ctrl_points
+                render_needed = True
 
             elif event.key == pygame.K_u:
                 if sel_pt >= 0 and not curve_in_progress and not line_in_progress:
@@ -671,6 +679,24 @@ while running:
     else:
         ctrl_hovered = -1
         sel_pt = -1
+
+    # ── Render gate ───────────────────────────────────────────────────────────
+
+    render_needed = (render_needed or dirty or sel_dirty or
+                     sel_pt != prev_sel_pt or
+                     ctrl_hovered != prev_ctrl_hov or
+                     (mp != prev_mp and (line_in_progress or curve_in_progress or
+                                         selection_in_progress or dragging_point or
+                                         dragging_ctrl_ci >= 0)))
+    if not render_needed:
+        clock.tick(60)
+        continue
+
+    ctx.clear(0, 0, 0, 1)
+    render_needed = False
+    prev_sel_pt   = sel_pt
+    prev_ctrl_hov = ctrl_hovered
+    prev_mp       = mp
 
     # ── Upload caches ─────────────────────────────────────────────────────────
 
