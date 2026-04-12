@@ -293,8 +293,20 @@ def _swap_del_pt(i):
 def del_point(i):
     line_list  = [int(pt_lines[i, k])  for k in range(int(pt_nl[i]))]
     curve_list = [int(pt_curves[i, k]) for k in range(int(pt_nc[i]))]
-    for li in line_list:  _del_line(li,  skip=i)
-    for ci in curve_list: _del_curve(ci, skip=i)
+    for j in range(len(line_list)):
+        li       = line_list[j]
+        old_last = ln_n - 1
+        _del_line(li, skip=i)
+        if li != old_last:
+            for k in range(j + 1, len(line_list)):
+                if line_list[k] == old_last: line_list[k] = li
+    for j in range(len(curve_list)):
+        ci       = curve_list[j]
+        old_last = crv_n - 1
+        _del_curve(ci, skip=i)
+        if ci != old_last:
+            for k in range(j + 1, len(curve_list)):
+                if curve_list[k] == old_last: curve_list[k] = ci
     _swap_del_pt(i)
 
 def add_line(p1, p2):
@@ -485,10 +497,13 @@ while running:
                     sel_pt = -1
                     dirty = True; sel_dirty = True
                 elif np.any(pt_sel[:pt_n]) or np.any(ln_sel[:ln_n]) or np.any(crv_sel[:crv_n]):
-                    pt_sel[:pt_n]   = False
-                    ln_sel[:ln_n]   = False
-                    crv_sel[:crv_n] = False
-                    sel_dirty = True
+                    while pt_n > 0 and np.any(pt_sel[:pt_n]):
+                        del_point(int(np.where(pt_sel[:pt_n])[0][0]))
+                    while ln_n > 0 and np.any(ln_sel[:ln_n]):
+                        _del_line(int(np.where(ln_sel[:ln_n])[0][0]))
+                    while crv_n > 0 and np.any(crv_sel[:crv_n]):
+                        _del_curve(int(np.where(crv_sel[:crv_n])[0][0]))
+                    dirty = True; sel_dirty = True
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 1:
@@ -547,39 +562,45 @@ while running:
                     dup_map[pi] = ni
                     return ni
 
-                for i in range(pt_n):
-                    if pt_sel[i]:
-                        ox, oy = unpack_pt(pts[i])
-                        pts[i] = pack_pt(ox + dx, oy + dy)
+                sel_idx = np.where(pt_sel[:pt_n])[0]
+                if len(sel_idx):
+                    v  = pts[sel_idx].astype(np.int32)
+                    xs = np.clip((v & 0x7FF) + dx, 0, 2047)
+                    ys = np.clip(((v >> 11) & 0x3FF) + dy, 0, 1023)
+                    pts[sel_idx] = (xs | (ys << 11)).astype(np.uint32)
 
-                for li in range(ln_n):
-                    p1, p2 = int(lns[li, 0]), int(lns[li, 1])
-                    s1, s2 = bool(pt_sel[p1]), bool(pt_sel[p2])
-                    if s1 and not s2:
-                        ni = _dup_if_needed(p2)
-                        _adj_remove(pt_lines, pt_nl, p2, li)
-                        lns[li, 1] = ni
-                        _adj_add(pt_lines, pt_nl, ni, li)
-                    elif s2 and not s1:
-                        ni = _dup_if_needed(p1)
-                        _adj_remove(pt_lines, pt_nl, p1, li)
-                        lns[li, 0] = ni
-                        _adj_add(pt_lines, pt_nl, ni, li)
+                if ln_n:
+                    lp1 = lns[:ln_n, 0]; lp2 = lns[:ln_n, 1]
+                    ls1 = pt_sel[lp1];   ls2 = pt_sel[lp2]
+                    for li in np.where(ls1 != ls2)[0]:
+                        p1, p2 = int(lns[li, 0]), int(lns[li, 1])
+                        if pt_sel[p1]:
+                            ni = _dup_if_needed(p2)
+                            _adj_remove(pt_lines, pt_nl, p2, li)
+                            lns[li, 1] = ni
+                            _adj_add(pt_lines, pt_nl, ni, li)
+                        else:
+                            ni = _dup_if_needed(p1)
+                            _adj_remove(pt_lines, pt_nl, p1, li)
+                            lns[li, 0] = ni
+                            _adj_add(pt_lines, pt_nl, ni, li)
 
-                for ci in range(crv_n):
-                    p1, p2 = int(crvs[ci, 0]), int(crvs[ci, 1])
-                    s1, s2 = bool(pt_sel[p1]), bool(pt_sel[p2])
-                    if s1 and not s2:
-                        ni = _dup_if_needed(p2)
-                        _adj_remove(pt_curves, pt_nc, p2, ci)
-                        crvs[ci, 1] = ni
-                        _adj_add(pt_curves, pt_nc, ni, ci)
-                    elif s2 and not s1:
-                        ni = _dup_if_needed(p1)
-                        _adj_remove(pt_curves, pt_nc, p1, ci)
-                        crvs[ci, 0] = ni
-                        _adj_add(pt_curves, pt_nc, ni, ci)
-                    if s1 or s2:
+                if crv_n:
+                    cp1 = crvs[:crv_n, 0]; cp2 = crvs[:crv_n, 1]
+                    cs1 = pt_sel[cp1];     cs2 = pt_sel[cp2]
+                    for ci in np.where(cs1 | cs2)[0]:
+                        p1, p2 = int(crvs[ci, 0]), int(crvs[ci, 1])
+                        s1, s2 = bool(pt_sel[p1]), bool(pt_sel[p2])
+                        if s1 and not s2:
+                            ni = _dup_if_needed(p2)
+                            _adj_remove(pt_curves, pt_nc, p2, ci)
+                            crvs[ci, 1] = ni
+                            _adj_add(pt_curves, pt_nc, ni, ci)
+                        elif s2 and not s1:
+                            ni = _dup_if_needed(p1)
+                            _adj_remove(pt_curves, pt_nc, p1, ci)
+                            crvs[ci, 0] = ni
+                            _adj_add(pt_curves, pt_nc, ni, ci)
                         crvs[ci, 2] = int(round(float(crvs[ci, 2]) + dx))
                         crvs[ci, 3] = int(round(float(crvs[ci, 3]) + dy))
                         _bake_curve(ci)
