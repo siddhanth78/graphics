@@ -1,6 +1,102 @@
 import pygame
 import moderngl
 import numpy as np
+import json
+import os
+import glob
+
+FRAMES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frames')
+os.makedirs(FRAMES_DIR, exist_ok=True)
+
+
+def get_frame_files():
+    files = glob.glob(os.path.join(FRAMES_DIR, 'frame*.json'))
+    def _num(p):
+        try: return int(os.path.basename(p)[5:-5])
+        except ValueError: return -1
+    return sorted([f for f in files if _num(f) >= 0], key=_num)
+
+
+def _scene_to_dict():
+    return {
+        'pts':  [int(pts[i]) for i in range(pt_n)],
+        'lns':  [[int(lns[i, 0]), int(lns[i, 1])] for i in range(ln_n)],
+        'crvs': [[int(crvs[i, j]) for j in range(4)] for i in range(crv_n)],
+    }
+
+
+def save_current_frame():
+    files = get_frame_files()
+    if files:
+        last_n = int(os.path.basename(files[-1])[5:-5])
+    else:
+        last_n = -1
+    path = os.path.join(FRAMES_DIR, f'frame{last_n + 1}.json')
+    with open(path, 'w') as f:
+        json.dump(_scene_to_dict(), f)
+
+
+def restore_scene(data):
+    global pts, pt_lines, pt_curves, pt_nl, pt_nc, pt_sel, pt_n
+    global lns, ln_sel, ln_n
+    global crvs, crv_verts, crv_sel, crv_n
+    global sel_pt, ctrl_hovered, dragging_ctrl_ci
+    global line_in_progress, curve_in_progress, dragging_point, dragging_pt_idx
+    global dirty, sel_dirty
+
+    saved_pts  = data['pts']
+    saved_lns  = data['lns']
+    saved_crvs = data['crvs']
+    new_pt_n   = len(saved_pts)
+    new_ln_n   = len(saved_lns)
+    new_crv_n  = len(saved_crvs)
+
+    pt_n = 0; ln_n = 0; crv_n = 0
+    pt_sel[:] = False; ln_sel[:] = False; crv_sel[:] = False
+    pt_lines[:] = -1; pt_curves[:] = -1; pt_nl[:] = 0; pt_nc[:] = 0
+
+    while len(pts) < new_pt_n:
+        pts = _grow(pts, 0); pt_lines = _grow(pt_lines, -1)
+        pt_curves = _grow(pt_curves, -1); pt_nl = _grow(pt_nl, 0)
+        pt_nc = _grow(pt_nc, 0); pt_sel = _grow(pt_sel, False)
+    while len(lns) < max(new_ln_n, 1):
+        lns = _grow(lns, 0); ln_sel = _grow(ln_sel, False)
+    while len(crvs) < max(new_crv_n, 1):
+        crvs = _grow(crvs, 0); crv_verts = _grow(crv_verts, 0.0)
+        crv_sel = _grow(crv_sel, False)
+
+    pt_n = new_pt_n
+    pts[:pt_n] = saved_pts
+
+    ln_n = new_ln_n
+    for li, (p1, p2) in enumerate(saved_lns):
+        lns[li] = [p1, p2]
+        _adj_add(pt_lines, pt_nl, p1, li)
+        _adj_add(pt_lines, pt_nl, p2, li)
+
+    crv_n = new_crv_n
+    for ci, row in enumerate(saved_crvs):
+        p1, p2, cx, cy = row
+        crvs[ci] = [p1, p2, cx, cy]
+        _adj_add(pt_curves, pt_nc, p1, ci)
+        _adj_add(pt_curves, pt_nc, p2, ci)
+        _bake_curve(ci)
+
+    sel_pt = -1; ctrl_hovered = -1; dragging_ctrl_ci = -1
+    line_in_progress = False; curve_in_progress = False
+    dragging_point = False; dragging_pt_idx = -1
+    dirty = True; sel_dirty = True
+
+
+def delete_last_frame():
+    files = get_frame_files()
+    if files:
+        os.remove(files[-1])
+
+
+def clear_all_frames():
+    for f in get_frame_files():
+        os.remove(f)
 
 pygame.init()
 
@@ -61,6 +157,10 @@ HINTS = [
     "P  toggle control points",
     "U  curve from selected",
     "D  delete / deselect",
+    "F  save frame",
+    "Y  play frames",
+    "L  delete last frame",
+    "E  clear all frames",
     "LMB  add point",
     "RMB on point  draw line",
     "RMB on empty  box select",
@@ -450,6 +550,12 @@ prev_ctrl_hov = -1
 prev_mp       = (-1, -1)
 clock         = pygame.time.Clock()
 
+playback_active    = False
+playback_paused    = False
+playback_frames    = []
+playback_idx       = 0
+playback_last_tick = 0
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 while running:
@@ -498,6 +604,49 @@ while running:
                         curve_control = (sx + px * 5, sy + py * 5)
                     else:
                         curve_control = (sx + 5, sy + 5)
+
+            elif event.key == pygame.K_f:
+                save_current_frame()
+
+            elif event.key == pygame.K_y:
+                if playback_active:
+                    playback_active = False
+                    playback_paused = False
+                else:
+                    playback_frames = get_frame_files()
+                    if playback_frames:
+                        playback_active    = True
+                        playback_paused    = False
+                        playback_idx       = 0
+                        playback_last_tick = pygame.time.get_ticks()
+                        with open(playback_frames[0]) as _f:
+                            restore_scene(json.load(_f))
+                        render_needed = True
+
+            elif event.key == pygame.K_SPACE and playback_active:
+                playback_paused = not playback_paused
+                if not playback_paused:
+                    playback_last_tick = pygame.time.get_ticks()
+
+            elif event.key == pygame.K_LEFT and playback_active:
+                playback_paused = True
+                playback_idx = max(0, playback_idx - 1)
+                with open(playback_frames[playback_idx]) as _f:
+                    restore_scene(json.load(_f))
+                render_needed = True
+
+            elif event.key == pygame.K_RIGHT and playback_active:
+                playback_paused = True
+                playback_idx = min(len(playback_frames) - 1, playback_idx + 1)
+                with open(playback_frames[playback_idx]) as _f:
+                    restore_scene(json.load(_f))
+                render_needed = True
+
+            elif event.key == pygame.K_l:
+                delete_last_frame()
+
+            elif event.key == pygame.K_e:
+                clear_all_frames()
 
             elif event.key == pygame.K_d:
                 if sel_pt >= 0:
@@ -679,6 +828,20 @@ while running:
     else:
         ctrl_hovered = -1
         sel_pt = -1
+
+    # ── Playback tick ─────────────────────────────────────────────────────────
+
+    if playback_active and not playback_paused:
+        now = pygame.time.get_ticks()
+        if now - playback_last_tick >= 500:
+            playback_idx += 1
+            if playback_idx >= len(playback_frames):
+                playback_active = False
+            else:
+                with open(playback_frames[playback_idx]) as _f:
+                    restore_scene(json.load(_f))
+                playback_last_tick = now
+                render_needed = True
 
     # ── Render gate ───────────────────────────────────────────────────────────
 
